@@ -1,0 +1,9 @@
+{
+  "name": "Padel Core AI",
+  "description": "Una aplicación de pádel de última generación con reserva de pistas, análisis de partidos impulsado por IA y funciones de entrenamiento personalizadas utilizando la API de Gemini.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation",
+    "camera"
+  ]
+}

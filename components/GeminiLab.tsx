@@ -6,8 +6,12 @@ import {
     connectLive
 } from '../services/geminiService';
 import { UploadIcon, MicIcon, StopIcon, VideoCameraIcon } from './icons';
-import { LiveServerMessage, LiveSession } from '@google/genai';
+// Fix: Removed non-exported LiveSession from import.
+import { LiveServerMessage } from '@google/genai';
 import { saveVideo } from '../services/dbService';
+
+// Fix: Infer LiveSession type from the connectLive function's return type.
+type LiveSession = Awaited<ReturnType<typeof connectLive>>;
 
 
 // --- Start of Audio Utilities ---
@@ -117,6 +121,11 @@ const GeminiLab: React.FC = () => {
     const liveVideoInputAudioContextRef = useRef<AudioContext | null>(null);
     const liveVideoScriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const liveVideoMediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    // Refs for live video AUDIO OUTPUT
+    const liveVideoOutputAudioContextRef = useRef<AudioContext | null>(null);
+    const liveVideoNextStartTimeRef = useRef(0);
+    const liveVideoAudioQueueRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+
 
     // Refs and Callbacks for Live Agent (Voice only)
     const sessionPromise = useRef<Promise<LiveSession> | null>(null);
@@ -215,6 +224,8 @@ const GeminiLab: React.FC = () => {
 
             setLiveAgent({ isConnected: true, status: 'Conectando...', userTranscript: '', agentTranscript: '' });
 
+            const voiceCoachInstruction = 'Eres un entrenador de pádel amigable y experto llamado Core. Proporciona consejos concisos y útiles. Habla en español.';
+
             sessionPromise.current = connectLive({
                 onopen: () => {
                     setLiveAgent(prev => ({ ...prev, status: 'Conectado. ¡Habla ahora!' }));
@@ -260,19 +271,21 @@ const GeminiLab: React.FC = () => {
                 onclose: () => {
                      setLiveAgent({ isConnected: false, status: 'Desconectado', userTranscript: '', agentTranscript: '' });
                 }
-            });
+            }, voiceCoachInstruction);
         } catch (error) {
             console.error("Failed to start live session:", error);
             setLiveAgent({ isConnected: false, status: 'Error al iniciar', userTranscript: '', agentTranscript: '' });
         }
     };
 
-
     const handleSaveVideo = useCallback(async () => {
         if (recordedChunksRef.current.length === 0) {
-            console.warn("No video data was recorded.");
             setLiveVideo(prev => ({ ...prev, status: 'Error: La grabación finalizó sin datos.' }));
-            alert('Error: No se pudo grabar el video. Inténtalo de nuevo.');
+            alert('Error: No se pudo grabar el video. La sesión fue demasiado corta o hubo un problema con la cámara.');
+            // Reset state without attempting to save
+            recordedChunksRef.current = [];
+            fullAnalysisTranscript.current = '';
+            setLiveVideo(prev => ({...prev, isAnalyzing: false, status: 'Listo para analizar', analysisText: ''}));
             return;
         }
 
@@ -300,8 +313,10 @@ const GeminiLab: React.FC = () => {
             setLiveVideo(prev => ({ ...prev, status: 'Guardado cancelado por el usuario.' }));
         }
         
+        // Reset for the next session
         recordedChunksRef.current = [];
         fullAnalysisTranscript.current = '';
+        setLiveVideo(prev => ({...prev, isAnalyzing: false, status: 'Listo para analizar', analysisText: ''}));
     }, []);
 
     // --- Live Video Analysis Logic ---
@@ -321,19 +336,31 @@ const GeminiLab: React.FC = () => {
             liveVideoScriptProcessorRef.current.disconnect();
         }
         liveVideoInputAudioContextRef.current?.close();
+        liveVideoOutputAudioContextRef.current?.close(); // Clean up output audio context
+        liveVideoAudioQueueRef.current.forEach(source => source.stop()); // Stop any playing audio
+        liveVideoAudioQueueRef.current.clear();
+
         liveVideoScriptProcessorRef.current = null;
         liveVideoMediaStreamSourceRef.current = null;
         liveVideoInputAudioContextRef.current = null;
-
+        liveVideoOutputAudioContextRef.current = null;
+        liveVideoNextStartTimeRef.current = 0;
+        
+        // Assign the save handler to the onstop event to ensure it runs after all data is collected.
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             mediaRecorderRef.current.onstop = handleSaveVideo;
             mediaRecorderRef.current.stop();
-        } else if (recordedChunksRef.current.length > 0) {
-            handleSaveVideo();
+        } else {
+            if (recordedChunksRef.current.length > 0) {
+                 handleSaveVideo();
+            } else {
+                 setLiveVideo(prev => ({...prev, status: 'Listo para analizar'}));
+            }
         }
         
         liveVideoStreamRef.current?.getTracks().forEach(track => track.stop());
         liveVideoStreamRef.current = null;
+        mediaRecorderRef.current = null;
 
         if (videoRef.current) {
             videoRef.current.srcObject = null;
@@ -343,67 +370,101 @@ const GeminiLab: React.FC = () => {
 
 
     const startLiveAnalysis = async () => {
-        try {
-            setLiveVideo({ isAnalyzing: true, status: 'Iniciando cámara...', analysisText: '' });
-            fullAnalysisTranscript.current = '';
-            recordedChunksRef.current = [];
+        // Reset state for a new session
+        setLiveVideo({ isAnalyzing: true, status: 'Iniciando cámara...', analysisText: '' });
+        fullAnalysisTranscript.current = '';
+        recordedChunksRef.current = [];
 
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setLiveVideo({ isAnalyzing: false, status: 'Error: El navegador no soporta acceso a la cámara.', analysisText: '' });
+            return;
+        }
+        
+        try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             liveVideoStreamRef.current = stream;
             
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                videoRef.current.onloadedmetadata = () => {
-                    videoRef.current?.play();
-                    setLiveVideo(prev => ({...prev, status: 'Cámara lista. Conectando a IA...'}));
-                    
-                    liveVideoInputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-
-                    liveVideoSessionPromise.current = connectLive({
-                        onopen: () => {
-                            setLiveVideo(prev => ({...prev, status: 'Conectado. Análisis en vivo...'}));
-                            if (!liveVideoStreamRef.current || !liveVideoInputAudioContextRef.current) return;
-                            
-                            const audioContext = liveVideoInputAudioContextRef.current;
-                            liveVideoMediaStreamSourceRef.current = audioContext.createMediaStreamSource(liveVideoStreamRef.current);
-                            liveVideoScriptProcessorRef.current = audioContext.createScriptProcessor(4096, 1, 1);
-                            
-                            liveVideoScriptProcessorRef.current.onaudioprocess = (e) => {
-                                const inputData = e.inputBuffer.getChannelData(0);
-                                liveVideoSessionPromise.current?.then(s => s.sendRealtimeInput({ media: createPcmBlob(inputData) }));
-                            };
-                            liveVideoMediaStreamSourceRef.current.connect(liveVideoScriptProcessorRef.current);
-                            liveVideoScriptProcessorRef.current.connect(audioContext.destination);
-
-                            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'video/webm' });
-                            mediaRecorderRef.current.ondataavailable = (e) => {
-                                if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-                            };
-                            mediaRecorderRef.current.start(1000); 
-                            
-                            frameIntervalRef.current = window.setInterval(sendVideoFrame, 1000); // 1 FPS
-                        },
-                        onmessage: (msg: LiveServerMessage) => {
-                             if (msg.serverContent?.outputTranscription?.text) {
-                                const newText = msg.serverContent.outputTranscription.text;
-                                fullAnalysisTranscript.current += newText;
-                                setLiveVideo(prev => ({...prev, analysisText: prev.analysisText + newText}));
-                            }
-                        },
-                        onerror: (e) => {
-                            console.error("Live video error:", e);
-                            setLiveVideo(prev => ({...prev, status: 'Error en la conexión. Inténtalo de nuevo.'}));
-                            stopLiveAnalysis();
-                        },
-                        onclose: () => {
-                            // Status update handled by stopLiveAnalysis
-                        }
-                    });
-                };
+            if (!videoRef.current) {
+                throw new Error("Video element not available.");
             }
+            
+            videoRef.current.srcObject = stream;
+            
+            await new Promise((resolve, reject) => {
+                videoRef.current!.onloadedmetadata = resolve;
+                videoRef.current!.onerror = reject;
+            });
+
+            videoRef.current.play();
+            setLiveVideo(prev => ({...prev, status: 'Cámara lista. Conectando a IA...'}));
+            
+            liveVideoInputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            liveVideoOutputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+
+            mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            mediaRecorderRef.current.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunksRef.current.push(event.data);
+                }
+            };
+            mediaRecorderRef.current.start(1000);
+
+            const videoCoachInstruction = `Eres un entrenador de pádel de IA llamado Core. Tu personalidad es enérgica, un poco dura pero siempre motivadora y de apoyo. Habla en español. Inicia la conversación proactivamente cuando el usuario comience el análisis con un saludo entusiasta como '¡Hola! Veo que ya estás listo para empezar. ¿Cómo te sientes? ¡A ver qué tan bueno eres, venga!'. Durante la sesión, analiza y comenta proactivamente los movimientos del jugador, la postura y las jugadas en tiempo real sin esperar a que te hablen. Si el jugador se detiene o te habla, responde de forma natural y contextual. Mantén tus comentarios concisos y accionables durante el juego.`;
+
+            liveVideoSessionPromise.current = connectLive({
+                onopen: () => {
+                    setLiveVideo(prev => ({...prev, status: 'Conectado. Análisis en vivo...'}));
+                    if (!liveVideoStreamRef.current || !liveVideoInputAudioContextRef.current) return;
+                    
+                    const audioContext = liveVideoInputAudioContextRef.current;
+                    liveVideoMediaStreamSourceRef.current = audioContext.createMediaStreamSource(liveVideoStreamRef.current);
+                    liveVideoScriptProcessorRef.current = audioContext.createScriptProcessor(4096, 1, 1);
+                    
+                    liveVideoScriptProcessorRef.current.onaudioprocess = (e) => {
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        liveVideoSessionPromise.current?.then(s => s.sendRealtimeInput({ media: createPcmBlob(inputData) }));
+                    };
+                    liveVideoMediaStreamSourceRef.current.connect(liveVideoScriptProcessorRef.current);
+                    liveVideoScriptProcessorRef.current.connect(audioContext.destination);
+
+                    frameIntervalRef.current = window.setInterval(sendVideoFrame, 1000); // 1 FPS
+                },
+                onmessage: async (msg: LiveServerMessage) => {
+                     if (msg.serverContent?.outputTranscription?.text) {
+                        const newText = msg.serverContent.outputTranscription.text;
+                        fullAnalysisTranscript.current += newText;
+                        setLiveVideo(prev => ({...prev, analysisText: prev.analysisText + newText}));
+                    }
+                    const audioData = msg.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+                    if (audioData && liveVideoOutputAudioContextRef.current) {
+                        const audioContext = liveVideoOutputAudioContextRef.current;
+                        liveVideoNextStartTimeRef.current = Math.max(liveVideoNextStartTimeRef.current, audioContext.currentTime);
+                        const audioBuffer = await decodeAudioData(decode(audioData), audioContext, 24000, 1);
+                        const source = audioContext.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(audioContext.destination);
+
+                        source.addEventListener('ended', () => liveVideoAudioQueueRef.current.delete(source));
+                        source.start(liveVideoNextStartTimeRef.current);
+                        liveVideoNextStartTimeRef.current += audioBuffer.duration;
+                        liveVideoAudioQueueRef.current.add(source);
+                    }
+                },
+                onerror: (e) => {
+                    console.error("Live video error:", e);
+                    setLiveVideo(prev => ({...prev, status: 'Error en la conexión. Finalizando.'}));
+                    stopLiveAnalysis();
+                },
+                onclose: () => {
+                    // Status is managed by stopLiveAnalysis to provide clearer user feedback
+                }
+            }, videoCoachInstruction);
+
         } catch (err) {
-            console.error("Error accessing camera:", err);
-            setLiveVideo({ isAnalyzing: false, status: 'Error: No se pudo acceder a la cámara.', analysisText: '' });
+            console.error("Error in startLiveAnalysis:", err);
+            const errorMessage = err instanceof Error ? err.message : 'Error desconocido.';
+            setLiveVideo({ isAnalyzing: false, status: `Error: No se pudo acceder a la cámara. ${errorMessage}`, analysisText: '' });
+            liveVideoStreamRef.current?.getTracks().forEach(track => track.stop());
         }
     };
 

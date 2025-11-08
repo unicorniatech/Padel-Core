@@ -72,14 +72,47 @@ const Matches: React.FC = () => {
     const VideoPlayerModal: React.FC<{ video: SavedVideo; onClose: () => void }> = ({ video, onClose }) => {
         const videoUrl = videoUrls.get(video.id);
 
+        const handleDownloadVideo = () => {
+            if (!videoUrl) return;
+            const link = document.createElement('a');
+            link.href = videoUrl;
+            const fileName = `${video.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.webm`;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        };
+    
+        const handleDownloadAnalysis = () => {
+            if (!video.analysis) return;
+            const blob = new Blob([video.analysis], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            const fileName = `${video.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_analisis.txt`;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        };
+
         return (
             <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100]">
                 <div className="bg-brand-gray rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col p-4">
-                    <div className="flex justify-between items-center mb-4">
+                    <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
                         <h3 className="text-xl font-bold text-brand-primary">{video.title}</h3>
-                        <button onClick={onClose} className="text-gray-400 hover:text-white">
-                            <CloseIcon className="w-6 h-6" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                            <button onClick={handleDownloadVideo} className="bg-brand-secondary text-brand-dark text-xs font-bold py-1.5 px-3 rounded-md transition-opacity hover:opacity-90">
+                                Descargar Video
+                            </button>
+                            <button onClick={handleDownloadAnalysis} disabled={!video.analysis} className="bg-gray-600 text-white text-xs font-bold py-1.5 px-3 rounded-md transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed">
+                                Descargar Análisis
+                            </button>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white">
+                                <CloseIcon className="w-6 h-6" />
+                            </button>
+                        </div>
                     </div>
                     <div className="flex flex-col lg:flex-row gap-4 overflow-hidden">
                         <div className="flex-grow lg:w-2/3">

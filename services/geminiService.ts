@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, GenerateContentResponse, Type, Modality, Chat, LiveSession, LiveServerMessage } from "@google/genai";
+import { GoogleGenAI, GenerateContentResponse, Type, Modality, Chat, LiveServerMessage } from "@google/genai";
 import { GroundingSource } from "../types";
 
 let ai: GoogleGenAI | null = null;
@@ -33,7 +33,21 @@ export const groundedSearch = async (prompt: string): Promise<{ text: string, so
             tools: [{ googleSearch: {} }],
         },
     });
-    const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    // Fix: Sanitize grounding chunks to match the stricter GroundingSource type.
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const sources: GroundingSource[] = chunks.reduce((acc: GroundingSource[], chunk) => {
+        const source: GroundingSource = {};
+        if (chunk.web?.uri && chunk.web.title) {
+            source.web = { uri: chunk.web.uri, title: chunk.web.title };
+        }
+        if (chunk.maps?.uri && chunk.maps.title) {
+            source.maps = { uri: chunk.maps.uri, title: chunk.maps.title };
+        }
+        if (source.web || source.maps) {
+            acc.push(source);
+        }
+        return acc;
+    }, []);
     return { text: response.text, sources };
 };
 
@@ -54,7 +68,21 @@ export const mapsSearch = async (prompt: string, lat: number, lng: number): Prom
         },
     });
 
-    const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    // Fix: Sanitize grounding chunks to match the stricter GroundingSource type.
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const sources: GroundingSource[] = chunks.reduce((acc: GroundingSource[], chunk) => {
+        const source: GroundingSource = {};
+        if (chunk.web?.uri && chunk.web.title) {
+            source.web = { uri: chunk.web.uri, title: chunk.web.title };
+        }
+        if (chunk.maps?.uri && chunk.maps.title) {
+            source.maps = { uri: chunk.maps.uri, title: chunk.maps.title };
+        }
+        if (source.web || source.maps) {
+            acc.push(source);
+        }
+        return acc;
+    }, []);
     return { text: response.text, sources };
 };
 
@@ -111,12 +139,13 @@ export const analyzeVideo = async (prompt: string): Promise<string> => {
 
 // --- Live Audio ---
 
+// Fix: Infer return type of connectLive instead of importing non-existent LiveSession type.
 export const connectLive = (callbacks: {
     onopen: () => void;
     onmessage: (message: LiveServerMessage) => void;
     onerror: (e: ErrorEvent) => void;
     onclose: (e: CloseEvent) => void;
-}): Promise<LiveSession> => {
+}, systemInstruction: string) => {
     return getAI().live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks,
@@ -127,7 +156,7 @@ export const connectLive = (callbacks: {
             },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
-            systemInstruction: 'Eres un entrenador de pádel amigable y experto llamado Core. Proporciona consejos concisos y útiles. Habla en español.',
+            systemInstruction,
         },
     });
 }
